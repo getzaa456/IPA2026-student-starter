@@ -27,14 +27,22 @@ def _default_netmiko_get(router, interface_name):
         "timeout": 10,
     }
     with ConnectHandler(**device) as net_connect:
-        ip_info = net_connect.send_command(
-            f"show ip interface {interface_name}",
-            use_textfsm=True,
-        )
-        descriptions = net_connect.send_command(
-            "show interfaces description",
-            use_textfsm=True,
-        )
+        try:
+            ip_info = net_connect.send_command(
+                f"show ip interface {interface_name}",
+                use_textfsm=True,
+            )
+        except Exception:
+            ip_info = []
+
+        try:
+            descriptions = net_connect.send_command(
+                "show interfaces description",
+                use_textfsm=True,
+            )
+        except Exception:
+            descriptions = []
+
         if isinstance(ip_info, str):
             ip_info = []
         if isinstance(descriptions, str):
@@ -46,6 +54,13 @@ def _default_netmiko_delete(router, interface_name):
     state = get_interface_state(router, interface_name)
     if state.get("status") == "ok" and state.get("result") == "not_found":
         return "not_found"
+    if state.get("status") == "error":
+        err_res = state.get("result")
+        if err_res == "authentication_failed":
+            raise PermissionError("Authentication failed")
+        if err_res == "connection_failed":
+            raise ConnectionError("Connection failed")
+        raise RuntimeError(f"Backend failed: {err_res}")
 
     from netmiko import ConnectHandler
 
