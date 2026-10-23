@@ -1,0 +1,11 @@
+desired:
+  name: Loopback999
+  ipv4: 10.200.1.1/32
+  description: New-Description
+  admin_state: up
+
+current:
+  name: Loopback999
+  ipv4: 10.100.1.1/32
+  description: Old-Description
+  admin_state: down
