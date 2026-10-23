@@ -8,7 +8,10 @@ WEBEX_API_BASE = "https://webexapis.com/v1"
 
 class WebexClient:
     def __init__(self, token=None, session=None):
-        self.token = token or os.environ.get("WEBEX_BOT_TOKEN", "")
+        tok = token if token is not None else os.environ.get("WEBEX_BOT_TOKEN")
+        if not tok:
+            raise PermissionError("Webex bot token is unavailable")
+        self.token = tok
         self.session = session or requests.Session()
 
     @property

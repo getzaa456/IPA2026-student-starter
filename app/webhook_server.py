@@ -131,9 +131,13 @@ def main():
     host = os.environ.get("WEBHOOK_HOST", "0.0.0.0")
     port = int(os.environ.get("WEBHOOK_PORT", "8000"))
 
-    client = WebexClient()
+    try:
+        client = WebexClient()
+    except PermissionError:
+        client = None
+
     bot_person_id = os.environ.get("BOT_PERSON_ID", "")
-    if not bot_person_id and client.token:
+    if client and not bot_person_id and client.token:
         try:
             me = client.get_me()
             bot_person_id = me.get("id", "")

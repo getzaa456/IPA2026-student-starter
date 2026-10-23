@@ -83,9 +83,16 @@ def get_interface_state(
         ipv4_section = iface_data.get("ietf-ip:ipv4", {})
         addresses = ipv4_section.get("address", [])
         if addresses:
-            ip = addresses[0].get("ip")
-            netmask = addresses[0].get("netmask")
-            ipv4 = str(IPv4Interface(f"{ip}/{netmask}"))
+            addr = addresses[0]
+            ip = addr.get("ip")
+            netmask = addr.get("netmask")
+            prefix = addr.get("prefix-length")
+            if prefix is not None:
+                ipv4 = f"{ip}/{prefix}"
+            elif netmask:
+                ipv4 = str(IPv4Interface(f"{ip}/{netmask}"))
+            else:
+                ipv4 = ip
         else:
             ipv4 = None
 

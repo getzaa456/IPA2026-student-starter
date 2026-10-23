@@ -76,7 +76,7 @@ def validate_request(data):
     if action in ("plan", "apply"):
         if "ipv4" not in iface or iface["ipv4"] is None or iface["ipv4"] == "":
             return {"status": "error", "result": "missing_ipv4"}
-        if "description" not in iface or iface["description"] is None:
+        if "description" not in iface or iface["description"] is None or iface["description"] == "":
             return {"status": "error", "result": "missing_description"}
         if "admin_state" not in iface or iface["admin_state"] is None or iface["admin_state"] == "":
             return {"status": "error", "result": "missing_admin_state"}
