@@ -71,14 +71,19 @@ def get_interface_state(
         if not data:
             return {"status": "ok", "result": "not_found", "interface": None}
 
-        iface_data = data.get("ietf-interfaces:interface")
-        if not iface_data:
+        iface_data = data.get("ietf-interfaces:interface") or data.get("interface")
+        if isinstance(iface_data, list) and iface_data:
+            iface_data = iface_data[0]
+        if not iface_data or not isinstance(iface_data, dict):
             return {"status": "ok", "result": "not_found", "interface": None}
 
         name = iface_data.get("name")
         description = iface_data.get("description")
         enabled = iface_data.get("enabled", True)
-        admin_state = "up" if enabled else "down"
+        if isinstance(enabled, str):
+            admin_state = "down" if enabled.strip().lower() in ("false", "0", "down") else "up"
+        else:
+            admin_state = "down" if enabled is False else "up"
 
         ipv4_section = iface_data.get("ietf-ip:ipv4", {})
         addresses = ipv4_section.get("address", [])
@@ -132,7 +137,9 @@ def apply_interface(
     putter = http_put or _default_http_put
 
     name = desired_interface["name"]
-    number = int(name[len("Loopback"):])
+    import re
+    digits = re.findall(r"\d+", name)
+    number = int(digits[0]) if digits else int(name[len("Loopback"):])
     url = (
         f"https://{router}/restconf/data/"
         f"Cisco-IOS-XE-native:native/interface/Loopback={number}"

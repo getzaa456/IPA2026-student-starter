@@ -76,10 +76,11 @@ def get_interface_state(
     try:
         root = ET.fromstring(xml_text)
         found_iface = None
+        norm_name = interface_name.strip().lower()
         for iface in root.iter():
             if iface.tag.endswith("interface"):
                 for child in iface:
-                    if child.tag.endswith("name") and child.text == interface_name:
+                    if child.tag.endswith("name") and child.text and child.text.strip().lower() == norm_name:
                         found_iface = iface
                         break
             if found_iface is not None:
@@ -96,20 +97,27 @@ def get_interface_state(
         for child in found_iface:
             tag = child.tag
             if tag.endswith("description"):
-                description = child.text
+                description = child.text.strip() if child.text else None
             elif tag.endswith("enabled"):
-                enabled = child.text.strip().lower() == "true"
+                val = child.text.strip().lower() if child.text else ""
+                enabled = val in ("true", "1", "up")
             elif tag.endswith("ipv4"):
                 for ip_elem in child.iter():
                     if ip_elem.tag.endswith("address"):
                         ip_val = None
                         netmask_val = None
+                        prefix_val = None
                         for addr_child in ip_elem:
                             if addr_child.tag.endswith("ip"):
-                                ip_val = addr_child.text
+                                ip_val = addr_child.text.strip() if addr_child.text else None
                             elif addr_child.tag.endswith("netmask"):
-                                netmask_val = addr_child.text
-                        if ip_val and netmask_val:
+                                netmask_val = addr_child.text.strip() if addr_child.text else None
+                            elif addr_child.tag.endswith("prefix-length"):
+                                prefix_val = addr_child.text.strip() if addr_child.text else None
+                        if ip_val and prefix_val is not None:
+                            ipv4_str = f"{ip_val}/{prefix_val}"
+                            break
+                        elif ip_val and netmask_val:
                             ipv4_str = str(IPv4Interface(f"{ip_val}/{netmask_val}"))
                             break
 
@@ -150,7 +158,9 @@ def apply_interface(
     """Apply complete desired interface state using NETCONF."""
     editor = netconf_edit_config or _default_netconf_edit_config
 
-    number = desired_interface["name"][len("Loopback"):].strip()
+    import re
+    digits = re.findall(r"\d+", desired_interface["name"])
+    number = digits[0] if digits else desired_interface["name"][len("Loopback"):].strip()
     ipv4 = IPv4Interface(desired_interface["ipv4"])
     address = str(ipv4.ip)
     mask = str(ipv4.network.netmask)

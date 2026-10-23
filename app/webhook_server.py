@@ -45,7 +45,8 @@ class WebexEventHandler:
 
         if len(files) > 1:
             result = {"status": "error", "result": "multiple_attachments"}
-            self.client.send_message(room_id, json.dumps(result))
+            text = json.dumps(result) if not isinstance(result, str) else result
+            self.client.send_message(room_id, text)
             return result
 
         if len(files) == 0:
@@ -54,7 +55,8 @@ class WebexEventHandler:
                 None,
                 self.bot_person_id,
             )
-            self.client.send_message(room_id, json.dumps(result))
+            text = json.dumps(result) if not isinstance(result, str) else result
+            self.client.send_message(room_id, text)
             return result
 
         file_url = files[0]
@@ -69,7 +71,8 @@ class WebexEventHandler:
                 self.bot_person_id,
             )
 
-        self.client.send_message(room_id, json.dumps(result))
+        text = json.dumps(result) if not isinstance(result, str) else result
+        self.client.send_message(room_id, text)
         return result
 
 
@@ -88,13 +91,15 @@ def make_http_handler(submit_event):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == "/health":
+            path = self.path.split("?")[0].rstrip("/") or "/"
+            if path == "/health":
                 self._send_json(200, {"status": "ok", "result": "healthy"})
             else:
                 self._send_json(404, {"status": "error", "result": "not_found"})
 
         def do_POST(self):
-            if self.path == "/webhook":
+            path = self.path.split("?")[0].rstrip("/") or "/"
+            if path == "/webhook":
                 content_len = self.headers.get("Content-Length")
                 if not content_len:
                     self._send_json(400, {"status": "error", "result": "invalid_event"})

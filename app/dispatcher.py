@@ -7,9 +7,9 @@ def dispatch_request(data):
     """
     Dispatch a validated request to the appropriate backend.
     """
-    method = data["method"]
-    action = data["action"]
-    router = data["router"]
+    method = str(data["method"]).strip().lower()
+    action = str(data["action"]).strip().lower()
+    router = str(data["router"]).strip()
     interface = data["desired"]["interface"]
 
     if method == "restconf":

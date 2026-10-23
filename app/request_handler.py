@@ -26,7 +26,7 @@ def validate_webex_envelope(
     ):
         return {"status": "error", "result": "missing_bot_mention"}
 
-    if attachment_path is None:
+    if attachment_path is None or attachment_path == "":
         return {"status": "error", "result": "no_yaml"}
 
     return None

@@ -115,12 +115,25 @@ def get_interface_state(
         return {"status": "ok", "result": "not_found", "interface": None}
 
     link_status = str(found_ip.get("link_status", "")).lower()
-    admin_state = "down" if "administratively down" in link_status else "up"
+    admin_state = "down" if "down" in link_status else "up"
 
-    ip_addrs = found_ip.get("ip_address", [])
-    prefixes = found_ip.get("prefix_length", [])
-    if ip_addrs and prefixes:
-        ipv4 = f"{ip_addrs[0]}/{prefixes[0]}"
+    ip_addrs = found_ip.get("ip_address")
+    prefixes = found_ip.get("prefix_length")
+
+    if isinstance(ip_addrs, list):
+        ip_val = ip_addrs[0] if ip_addrs else None
+    else:
+        ip_val = str(ip_addrs) if ip_addrs else None
+
+    if isinstance(prefixes, list):
+        prefix_val = prefixes[0] if prefixes else None
+    else:
+        prefix_val = str(prefixes) if prefixes else None
+
+    if ip_val and prefix_val:
+        ipv4 = f"{ip_val}/{prefix_val}"
+    elif ip_val:
+        ipv4 = ip_val
     else:
         ipv4 = None
 
@@ -164,6 +177,8 @@ def delete_interface(
             return {"status": "error", "result": "connection_failed"}
         return {"status": "error", "result": "backend_failed"}
 
+    if isinstance(del_result, dict):
+        return del_result
     if del_result == "not_found":
         return {"status": "ok", "result": "not_found", "interface": None}
     if del_result == "deleted":
