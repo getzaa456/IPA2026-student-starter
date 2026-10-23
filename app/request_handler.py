@@ -1,4 +1,4 @@
-from app.core import process_request_file
+from app.core import error, process_request_file
 
 
 def validate_webex_envelope(
@@ -9,14 +9,6 @@ def validate_webex_envelope(
     """
     Validate the target bot's actual mention and YAML attachment.
     Return an error response, or None when the envelope is valid.
-
-    Validation order:
-    1. bot_person_id must be a non-empty string, and mentioned_people
-       must be a list containing it. Otherwise return
-       {"status": "error", "result": "missing_bot_mention"}.
-    2. If the mention is valid but attachment_path is None, return
-       {"status": "error", "result": "no_yaml"}.
-    3. validate_webex_envelope() returns None when both checks pass.
     """
     if (
         not isinstance(bot_person_id, str)
@@ -24,10 +16,10 @@ def validate_webex_envelope(
         or not isinstance(mentioned_people, list)
         or bot_person_id not in mentioned_people
     ):
-        return {"status": "error", "result": "missing_bot_mention"}
+        return error("missing_bot_mention")
 
-    if attachment_path is None or attachment_path == "":
-        return {"status": "error", "result": "no_yaml"}
+    if attachment_path is None:
+        return error("no_yaml")
 
     return None
 
@@ -38,11 +30,13 @@ def handle_webex_request(
     bot_person_id,
 ):
     """
-    Validate the envelope, then validate the attached YAML request.
+    Simulated Part 1 entry point for tests.
     Return a response dictionary. Do not dispatch to a router.
     """
     envelope_error = validate_webex_envelope(
-        mentioned_people, attachment_path, bot_person_id
+        mentioned_people,
+        attachment_path,
+        bot_person_id,
     )
     if envelope_error is not None:
         return envelope_error

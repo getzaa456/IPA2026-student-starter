@@ -1,27 +1,34 @@
-from pathlib import Path
 import yaml
 
-ALLOWED_ROUTERS = {
+
+ALLOWED_ROUTERS = (
     "10.0.29.101",
     "10.0.29.102",
     "10.0.29.103",
     "10.0.29.104",
     "10.0.29.105",
-}
+)
 
-ALLOWED_METHODS = {
-    "restconf",
-    "netconf",
-    "ansible",
-    "netmiko-textfsm",
-}
-
+# Capability matrix: which actions each method supports.
 METHOD_ACTIONS = {
-    "restconf": {"status", "plan", "apply"},
-    "netconf": {"status", "plan", "apply"},
-    "ansible": {"apply"},
-    "netmiko-textfsm": {"status", "delete"},
+    "restconf": ("status", "plan", "apply"),
+    "netconf": ("status", "plan", "apply"),
+    "ansible": ("apply",),
+    "netmiko-textfsm": ("status", "delete"),
 }
+
+# Actions that require a complete desired interface definition.
+FULL_STATE_ACTIONS = ("plan", "apply")
+
+ADMIN_STATES = ("up", "down")
+
+
+def error(code):
+    return {"status": "error", "result": code}
+
+
+def _missing(mapping, key):
+    return mapping.get(key) is None
 
 
 def validate_request(data):
@@ -29,61 +36,64 @@ def validate_request(data):
     Validate one IPA2026 desired-state request.
 
     Return a response dictionary according to
-    specs/response-spec-v1.md and specs/desired-state-spec-v1.md.
+    specs/response-spec-v1.md.
     """
     if not isinstance(data, dict):
-        return {"status": "error", "result": "invalid_yaml"}
+        return error("invalid_yaml")
 
-    # 1. version: must be the YAML integer 1
-    # In Python, bool is a subclass of int, so we check `type(v) is int`
+    # bool is a subclass of int, so check the exact type.
     version = data.get("version")
-    if "version" not in data or type(version) is not int or version != 1:
-        return {"status": "error", "result": "invalid_version"}
+    if type(version) is not int or version != 1:
+        return error("invalid_version")
 
-    # 2. router: missing_router, then invalid_router
-    if "router" not in data or data["router"] is None or data["router"] == "":
-        return {"status": "error", "result": "missing_router"}
-    if str(data["router"]) not in ALLOWED_ROUTERS:
-        return {"status": "error", "result": "invalid_router"}
+    if _missing(data, "router"):
+        return error("missing_router")
+    if data["router"] not in ALLOWED_ROUTERS:
+        return error("invalid_router")
 
-    # 3. method: missing_method, then invalid_method
-    if "method" not in data or data["method"] is None or data["method"] == "":
-        return {"status": "error", "result": "missing_method"}
-    if data["method"] not in ALLOWED_METHODS:
-        return {"status": "error", "result": "invalid_method"}
+    if _missing(data, "method"):
+        return error("missing_method")
+    method = data["method"]
+    if not isinstance(method, str) or method not in METHOD_ACTIONS:
+        return error("invalid_method")
 
-    # 4. action: missing_action, then invalid_action
-    if "action" not in data or data["action"] is None or data["action"] == "":
-        return {"status": "error", "result": "missing_action"}
-    if data["action"] not in METHOD_ACTIONS.get(data["method"], set()):
-        return {"status": "error", "result": "invalid_action"}
-
-    # 5. desired, desired.interface, desired.interface.name
-    if "desired" not in data or not isinstance(data["desired"], dict):
-        return {"status": "error", "result": "missing_desired"}
-    desired = data["desired"]
-
-    if "interface" not in desired or not isinstance(desired["interface"], dict):
-        return {"status": "error", "result": "missing_interface"}
-    iface = desired["interface"]
-
-    if "name" not in iface or iface["name"] is None or iface["name"] == "":
-        return {"status": "error", "result": "missing_interface_name"}
-
-    # 6. For plan and apply only:
-    # missing_ipv4, missing_description, missing_admin_state, invalid_admin_state
+    if _missing(data, "action"):
+        return error("missing_action")
     action = data["action"]
-    if action in ("plan", "apply"):
-        if "ipv4" not in iface or iface["ipv4"] is None or iface["ipv4"] == "":
-            return {"status": "error", "result": "missing_ipv4"}
-        if "description" not in iface or iface["description"] is None or iface["description"] == "":
-            return {"status": "error", "result": "missing_description"}
-        if "admin_state" not in iface or iface["admin_state"] is None or iface["admin_state"] == "":
-            return {"status": "error", "result": "missing_admin_state"}
-        if iface["admin_state"] not in ("up", "down"):
-            return {"status": "error", "result": "invalid_admin_state"}
+    if action not in METHOD_ACTIONS[method]:
+        return error("invalid_action")
+
+    if _missing(data, "desired"):
+        return error("missing_desired")
+    desired = data["desired"]
+    if not isinstance(desired, dict) or _missing(desired, "interface"):
+        return error("missing_interface")
+    interface = desired["interface"]
+    if not isinstance(interface, dict) or _missing(interface, "name"):
+        return error("missing_interface_name")
+
+    if action in FULL_STATE_ACTIONS:
+        for field in ("ipv4", "description", "admin_state"):
+            if _missing(interface, field):
+                return error(f"missing_{field}")
+        if interface["admin_state"] not in ADMIN_STATES:
+            return error("invalid_admin_state")
 
     return {"status": "ok", "result": "accepted"}
+
+
+def load_request_file(path):
+    """
+    Read and parse a YAML request file.
+
+    Return (data, None) on success, or (None, error_response) when the
+    file cannot be read or parsed.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f), None
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None, error("invalid_yaml")
 
 
 def process_request_file(path):
@@ -91,13 +101,7 @@ def process_request_file(path):
     Read a YAML request file, validate it,
     and return a response dictionary.
     """
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except Exception:
-        return {"status": "error", "result": "invalid_yaml"}
-
-    if not isinstance(data, dict):
-        return {"status": "error", "result": "invalid_yaml"}
-
+    data, load_error = load_request_file(path)
+    if load_error is not None:
+        return load_error
     return validate_request(data)

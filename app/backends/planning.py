@@ -7,13 +7,13 @@ def plan_interface(
     get_interface_state,
 ):
     """Build a Part 2 plan from backend status."""
-    status_response = get_interface_state(router, desired_interface["name"])
-    if status_response.get("status") == "error":
-        return status_response
+    status = get_interface_state(router, desired_interface["name"])
 
-    result_type = status_response.get("result")
-    if result_type == "found":
-        current_interface = status_response.get("interface")
+    if status.get("status") != "ok":
+        return status
+
+    if status.get("result") == "found":
+        current_interface = status["interface"]
     else:
         current_interface = None
 

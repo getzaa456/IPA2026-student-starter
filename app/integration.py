@@ -1,35 +1,35 @@
 """Part 4 student implementation."""
 
-from pathlib import Path
-import yaml
+import logging
 
-from app.core import validate_request
+from app.core import error, load_request_file, validate_request
 from app.dispatcher import dispatch_request
 from app.request_handler import validate_webex_envelope
 
+logger = logging.getLogger(__name__)
+
 
 def process_request(mentioned_people, attachment_path, bot_person_id):
-    """
-    Validate webex envelope and attached YAML file,
-    then dispatch to router if valid.
-    """
-    envelope_err = validate_webex_envelope(
-        mentioned_people, attachment_path, bot_person_id
+    envelope_error = validate_webex_envelope(
+        mentioned_people,
+        attachment_path,
+        bot_person_id,
     )
-    if envelope_err is not None:
-        return envelope_err
+    if envelope_error is not None:
+        return envelope_error
+
+    data, load_error = load_request_file(attachment_path)
+    if load_error is not None:
+        return load_error
+
+    validation = validate_request(data)
+    if validation["result"] != "accepted":
+        return validation
 
     try:
-        with open(attachment_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        return dispatch_request(data)
     except Exception:
-        return {"status": "error", "result": "invalid_yaml"}
-
-    if not isinstance(data, dict):
-        return {"status": "error", "result": "invalid_yaml"}
-
-    validation_result = validate_request(data)
-    if validation_result.get("status") == "error":
-        return validation_result
-
-    return dispatch_request(data)
+        # Backends map their own failures; this only guards the bot
+        # against an unexpected bug so it still answers the room.
+        logger.exception("dispatch failed")
+        return error("backend_failed")

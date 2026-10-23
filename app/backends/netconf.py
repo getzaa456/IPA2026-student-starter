@@ -1,49 +1,107 @@
-from ipaddress import IPv4Interface
-import os
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
-from app.backends.planning import plan_interface as planning_plan_interface
+from app.backends import planning
+from app.backends.common import (
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
+    applied,
+    error,
+    error_from_exception,
+    found,
+    loopback_number,
+    not_found,
+    router_credentials,
+    split_ipv4,
+    to_cidr,
+)
 
-NETCONF_NS = "urn:ietf:params:xml:ns:netconf:base:1.0"
-NATIVE_NS = "http://cisco.com/ns/yang/Cisco-IOS-XE-native"
-IETF_IF_NS = "urn:ietf:params:xml:ns:yang:ietf-interfaces"
-IETF_IP_NS = "urn:ietf:params:xml:ns:yang:ietf-ip"
+
+NETCONF_PORT = 830
+
+IF_NS = "urn:ietf:params:xml:ns:yang:ietf-interfaces"
+IP_NS = "urn:ietf:params:xml:ns:yang:ietf-ip"
 
 
-def _default_netconf_get_config(router, filter_xml):
+def _connect(router):
     from ncclient import manager
 
-    user = os.environ.get("ROUTER_USER", "")
-    password = os.environ.get("ROUTER_PASS", "")
-
-    with manager.connect(
+    username, password = router_credentials()
+    session = manager.connect(
         host=router,
-        port=830,
-        username=user,
+        port=NETCONF_PORT,
+        username=username,
         password=password,
         hostkey_verify=False,
-        device_params={"name": "iosxe"},
-        timeout=10,
-    ) as m:
-        return m.get_config(source="running", filter=("subtree", filter_xml)).data_xml
+        look_for_keys=False,
+        allow_agent=False,
+        timeout=CONNECT_TIMEOUT,
+    )
+    session.timeout = READ_TIMEOUT
+    return session
 
 
-def _default_netconf_edit_config(router, config_xml):
-    from ncclient import manager
+def _real_get_config(router, filter_xml):
+    with _connect(router) as session:
+        reply = session.get_config(
+            source="running",
+            filter=("subtree", filter_xml),
+        )
+        return reply.xml
 
-    user = os.environ.get("ROUTER_USER", "")
-    password = os.environ.get("ROUTER_PASS", "")
 
-    with manager.connect(
-        host=router,
-        port=830,
-        username=user,
-        password=password,
-        hostkey_verify=False,
-        device_params={"name": "iosxe"},
-        timeout=10,
-    ) as m:
-        m.edit_config(target="running", config=config_xml)
+def _real_edit_config(router, config_xml):
+    with _connect(router) as session:
+        session.edit_config(target="running", config=config_xml)
+
+
+def _status_filter(interface_name):
+    return (
+        f'<interfaces xmlns="{IF_NS}">'
+        "<interface>"
+        f"<name>{escape(interface_name)}</name>"
+        "</interface>"
+        "</interfaces>"
+    )
+
+
+def _text(element, path):
+    child = element.find(path)
+    if child is None or child.text is None:
+        return None
+    return child.text.strip()
+
+
+def _normalize(xml_text, interface_name):
+    """Find the requested interface in ietf-interfaces XML and normalize it."""
+    root = ET.fromstring(xml_text)
+
+    for interface in root.iter(f"{{{IF_NS}}}interface"):
+        if _text(interface, f"{{{IF_NS}}}name") != interface_name:
+            continue
+
+        address = interface.find(
+            f"{{{IP_NS}}}ipv4/{{{IP_NS}}}address"
+        )
+        ipv4 = None
+        if address is not None:
+            ipv4 = to_cidr(
+                _text(address, f"{{{IP_NS}}}ip"),
+                netmask=_text(address, f"{{{IP_NS}}}netmask"),
+                prefix_length=_text(address, f"{{{IP_NS}}}prefix-length"),
+            )
+
+        # ietf-interfaces defaults "enabled" to true when absent.
+        enabled = _text(interface, f"{{{IF_NS}}}enabled") or "true"
+
+        return {
+            "name": interface_name,
+            "ipv4": ipv4,
+            "description": _text(interface, f"{{{IF_NS}}}description"),
+            "admin_state": "up" if enabled == "true" else "down",
+        }
+
+    return None
 
 
 def get_interface_state(
@@ -52,89 +110,21 @@ def get_interface_state(
     netconf_get_config=None,
 ):
     """Return normalized interface status using NETCONF."""
-    getter = netconf_get_config or _default_netconf_get_config
-    filter_xml = (
-        f'<interfaces xmlns="{IETF_IF_NS}">'
-        f"<interface><name>{interface_name}</name></interface>"
-        f"</interfaces>"
-    )
+    netconf_get_config = netconf_get_config or _real_get_config
 
     try:
-        xml_text = getter(router, filter_xml)
-    except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
-    except ConnectionError:
-        return {"status": "error", "result": "connection_failed"}
+        xml_text = netconf_get_config(router, _status_filter(interface_name))
     except Exception as exc:
-        exc_name = type(exc).__name__
-        if "Authentication" in exc_name:
-            return {"status": "error", "result": "authentication_failed"}
-        if "SSH" in exc_name or "Connection" in exc_name or "Timeout" in exc_name:
-            return {"status": "error", "result": "connection_failed"}
-        return {"status": "error", "result": "backend_failed"}
+        return error_from_exception(exc)
 
     try:
-        root = ET.fromstring(xml_text)
-        found_iface = None
-        norm_name = interface_name.strip().lower()
-        for iface in root.iter():
-            if iface.tag.endswith("interface"):
-                for child in iface:
-                    if child.tag.endswith("name") and child.text and child.text.strip().lower() == norm_name:
-                        found_iface = iface
-                        break
-            if found_iface is not None:
-                break
-
-        if found_iface is None:
-            return {"status": "ok", "result": "not_found", "interface": None}
-
-        name = interface_name
-        description = None
-        enabled = True
-        ipv4_str = None
-
-        for child in found_iface:
-            tag = child.tag
-            if tag.endswith("description"):
-                description = child.text.strip() if child.text else None
-            elif tag.endswith("enabled"):
-                val = child.text.strip().lower() if child.text else ""
-                enabled = val in ("true", "1", "up")
-            elif tag.endswith("ipv4"):
-                for ip_elem in child.iter():
-                    if ip_elem.tag.endswith("address"):
-                        ip_val = None
-                        netmask_val = None
-                        prefix_val = None
-                        for addr_child in ip_elem:
-                            if addr_child.tag.endswith("ip"):
-                                ip_val = addr_child.text.strip() if addr_child.text else None
-                            elif addr_child.tag.endswith("netmask"):
-                                netmask_val = addr_child.text.strip() if addr_child.text else None
-                            elif addr_child.tag.endswith("prefix-length"):
-                                prefix_val = addr_child.text.strip() if addr_child.text else None
-                        if ip_val and prefix_val is not None:
-                            ipv4_str = f"{ip_val}/{prefix_val}"
-                            break
-                        elif ip_val and netmask_val:
-                            ipv4_str = str(IPv4Interface(f"{ip_val}/{netmask_val}"))
-                            break
-
-        admin_state = "up" if enabled else "down"
-
-        return {
-            "status": "ok",
-            "result": "found",
-            "interface": {
-                "name": name,
-                "ipv4": ipv4_str,
-                "description": description,
-                "admin_state": admin_state,
-            },
-        }
+        interface = _normalize(xml_text, interface_name)
     except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        return error("backend_failed")
+
+    if interface is None:
+        return not_found()
+    return found(interface)
 
 
 def plan_interface(
@@ -143,10 +133,35 @@ def plan_interface(
     netconf_get_config=None,
 ):
     """Return create/update/no_change plan using NETCONF status."""
-    return planning_plan_interface(
+    return planning.plan_interface(
         router,
         desired_interface,
-        lambda r, name: get_interface_state(r, name, netconf_get_config=netconf_get_config),
+        lambda r, name: get_interface_state(r, name, netconf_get_config),
+    )
+
+
+def build_config(desired_interface):
+    number = loopback_number(desired_interface["name"])
+    address, netmask = split_ipv4(desired_interface["ipv4"])
+    shutdown = "<shutdown/>" if desired_interface["admin_state"] == "down" else ""
+
+    return (
+        '<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"'
+        ' xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0">'
+        '<native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">'
+        "<interface>"
+        '<Loopback nc:operation="replace">'
+        f"<name>{number}</name>"
+        f"<description>{escape(desired_interface['description'])}</description>"
+        "<ip><address><primary>"
+        f"<address>{address}</address>"
+        f"<mask>{netmask}</mask>"
+        "</primary></address></ip>"
+        f"{shutdown}"
+        "</Loopback>"
+        "</interface>"
+        "</native>"
+        "</config>"
     )
 
 
@@ -156,48 +171,16 @@ def apply_interface(
     netconf_edit_config=None,
 ):
     """Apply complete desired interface state using NETCONF."""
-    editor = netconf_edit_config or _default_netconf_edit_config
-
-    import re
-    digits = re.findall(r"\d+", desired_interface["name"])
-    number = digits[0] if digits else desired_interface["name"][len("Loopback"):].strip()
-    ipv4 = IPv4Interface(desired_interface["ipv4"])
-    address = str(ipv4.ip)
-    mask = str(ipv4.network.netmask)
-    description = desired_interface["description"]
-
-    shutdown_xml = "\n            <shutdown/>" if desired_interface.get("admin_state") == "down" else ""
-
-    config_xml = f"""<config xmlns="{NETCONF_NS}" xmlns:nc="{NETCONF_NS}">
-  <native xmlns="{NATIVE_NS}">
-    <interface>
-      <Loopback nc:operation="replace">
-        <name>{number}</name>
-        <description>{description}</description>
-        <ip>
-          <address>
-            <primary>
-              <address>{address}</address>
-              <mask>{mask}</mask>
-            </primary>
-          </address>
-        </ip>{shutdown_xml}
-      </Loopback>
-    </interface>
-  </native>
-</config>"""
+    netconf_edit_config = netconf_edit_config or _real_edit_config
 
     try:
-        editor(router, config_xml)
-        return {"status": "ok", "result": "applied"}
-    except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
-    except ConnectionError:
-        return {"status": "error", "result": "connection_failed"}
+        config_xml = build_config(desired_interface)
+    except (KeyError, TypeError, ValueError):
+        return error("backend_failed")
+
+    try:
+        netconf_edit_config(router, config_xml)
     except Exception as exc:
-        exc_name = type(exc).__name__
-        if "Authentication" in exc_name:
-            return {"status": "error", "result": "authentication_failed"}
-        if "SSH" in exc_name or "Connection" in exc_name or "Timeout" in exc_name:
-            return {"status": "error", "result": "connection_failed"}
-        return {"status": "error", "result": "backend_failed"}
+        return error_from_exception(exc)
+
+    return applied()

@@ -5,46 +5,27 @@ def build_plan(desired_interface, current_interface):
     """
     Compare desired interface state with normalized current state
     and return a plan according to specs/plan-spec-v1.md.
-
-    Produces one of:
-    - create: when current_interface is None
-    - update: when current_interface exists and differs from desired
-    - no_change: when current_interface matches desired
     """
     if current_interface is None:
+        operation = "create"
         changes = {
             field: {"to": desired_interface[field]}
             for field in MANAGED_FIELDS
-            if field in desired_interface
         }
-        return {
-            "status": "ok",
-            "result": "planned",
-            "operation": "create",
-            "changes": changes,
-        }
-
-    changes = {}
-    for field in MANAGED_FIELDS:
-        desired_val = desired_interface.get(field)
-        current_val = current_interface.get(field)
-        if desired_val != current_val:
-            changes[field] = {
-                "from": current_val,
-                "to": desired_val,
+    else:
+        changes = {
+            field: {
+                "from": current_interface.get(field),
+                "to": desired_interface[field],
             }
-
-    if not changes:
-        return {
-            "status": "ok",
-            "result": "planned",
-            "operation": "no_change",
-            "changes": {},
+            for field in MANAGED_FIELDS
+            if current_interface.get(field) != desired_interface[field]
         }
+        operation = "update" if changes else "no_change"
 
     return {
         "status": "ok",
         "result": "planned",
-        "operation": "update",
+        "operation": operation,
         "changes": changes,
     }

@@ -1,41 +1,96 @@
-from ipaddress import IPv4Interface
-import os
-import requests
-import urllib3
+from urllib.parse import quote
 
-from app.backends.planning import plan_interface as planning_plan_interface
+from app.backends import planning
+from app.backends.common import (
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
+    applied,
+    error,
+    error_from_exception,
+    found,
+    loopback_number,
+    not_found,
+    router_credentials,
+    split_ipv4,
+    to_cidr,
+)
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+YANG_JSON = "application/yang-data+json"
+HEADERS = {"Accept": YANG_JSON, "Content-Type": YANG_JSON}
+
+SUCCESS_CODES = (200, 201, 204)
+AUTH_FAILURE_CODES = (401, 403)
 
 
-def _default_http_get(url):
-    user = os.environ.get("ROUTER_USER", "")
-    password = os.environ.get("ROUTER_PASS", "")
-    headers = {"Accept": "application/yang-data+json"}
-    return requests.get(
-        url,
-        auth=(user, password),
-        headers=headers,
-        verify=False,
-        timeout=10,
+def _status_url(router, interface_name):
+    name = quote(interface_name, safe="")
+    return (
+        f"https://{router}/restconf/data/"
+        f"ietf-interfaces:interfaces/interface={name}"
     )
 
 
-def _default_http_put(url, json):
-    user = os.environ.get("ROUTER_USER", "")
-    password = os.environ.get("ROUTER_PASS", "")
-    headers = {
-        "Content-Type": "application/yang-data+json",
-        "Accept": "application/yang-data+json",
+def _apply_url(router, number):
+    return (
+        f"https://{router}/restconf/data/"
+        f"Cisco-IOS-XE-native:native/interface/Loopback={number}"
+    )
+
+
+def _session():
+    import requests
+    import urllib3
+
+    # Lab routers use self-signed certificates.
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    session = requests.Session()
+    session.auth = router_credentials()
+    session.headers.update(HEADERS)
+    session.verify = False
+    return session
+
+
+def _real_http_get(url):
+    with _session() as session:
+        return session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+
+
+def _real_http_put(url, json):
+    with _session() as session:
+        return session.put(
+            url, json=json, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
+        )
+
+
+def _normalize(raw, interface_name):
+    """Convert ietf-interfaces JSON into the normalized interface dict."""
+    data = raw["ietf-interfaces:interface"]
+    if isinstance(data, list):
+        data = next(
+            (item for item in data if item.get("name") == interface_name),
+            None,
+        )
+        if data is None:
+            return None
+
+    addresses = (data.get("ietf-ip:ipv4") or {}).get("address") or []
+    ipv4 = None
+    if addresses:
+        first = addresses[0]
+        ipv4 = to_cidr(
+            first.get("ip"),
+            netmask=first.get("netmask"),
+            prefix_length=first.get("prefix-length"),
+        )
+
+    return {
+        "name": data["name"],
+        "ipv4": ipv4,
+        "description": data.get("description"),
+        # ietf-interfaces defaults "enabled" to true when absent.
+        "admin_state": "up" if data.get("enabled", True) else "down",
     }
-    return requests.put(
-        url,
-        auth=(user, password),
-        headers=headers,
-        json=json,
-        verify=False,
-        timeout=10,
-    )
 
 
 def get_interface_state(
@@ -44,75 +99,28 @@ def get_interface_state(
     http_get=None,
 ):
     """Return normalized interface status using RESTCONF."""
-    getter = http_get or _default_http_get
-    url = (
-        f"https://{router}/restconf/data/"
-        f"ietf-interfaces:interfaces/interface={interface_name}"
-    )
+    http_get = http_get or _real_http_get
 
     try:
-        response = getter(url)
-    except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
-    except (ConnectionError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        return {"status": "error", "result": "connection_failed"}
-    except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        response = http_get(_status_url(router, interface_name))
+    except Exception as exc:
+        return error_from_exception(exc)
 
     if response.status_code == 404:
-        return {"status": "ok", "result": "not_found", "interface": None}
-    if response.status_code in (401, 403):
-        return {"status": "error", "result": "authentication_failed"}
-    if response.status_code >= 400:
-        return {"status": "error", "result": "backend_failed"}
+        return not_found()
+    if response.status_code in AUTH_FAILURE_CODES:
+        return error("authentication_failed")
+    if response.status_code != 200:
+        return error("backend_failed")
 
     try:
-        data = response.json()
-        if not data:
-            return {"status": "ok", "result": "not_found", "interface": None}
-
-        iface_data = data.get("ietf-interfaces:interface") or data.get("interface")
-        if isinstance(iface_data, list) and iface_data:
-            iface_data = iface_data[0]
-        if not iface_data or not isinstance(iface_data, dict):
-            return {"status": "ok", "result": "not_found", "interface": None}
-
-        name = iface_data.get("name")
-        description = iface_data.get("description")
-        enabled = iface_data.get("enabled", True)
-        if isinstance(enabled, str):
-            admin_state = "down" if enabled.strip().lower() in ("false", "0", "down") else "up"
-        else:
-            admin_state = "down" if enabled is False else "up"
-
-        ipv4_section = iface_data.get("ietf-ip:ipv4", {})
-        addresses = ipv4_section.get("address", [])
-        if addresses:
-            addr = addresses[0]
-            ip = addr.get("ip")
-            netmask = addr.get("netmask")
-            prefix = addr.get("prefix-length")
-            if prefix is not None:
-                ipv4 = f"{ip}/{prefix}"
-            elif netmask:
-                ipv4 = str(IPv4Interface(f"{ip}/{netmask}"))
-            else:
-                ipv4 = ip
-        else:
-            ipv4 = None
-
-        return {
-            "status": "ok",
-            "result": "found",
-            "interface": {
-                "name": name,
-                "ipv4": ipv4,
-                "description": description,
-                "admin_state": admin_state,
-            },
-        }
+        interface = _normalize(response.json(), interface_name)
     except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        return error("backend_failed")
+
+    if interface is None:
+        return not_found()
+    return found(interface)
 
 
 def plan_interface(
@@ -121,11 +129,33 @@ def plan_interface(
     http_get=None,
 ):
     """Return create/update/no_change plan using RESTCONF status."""
-    return planning_plan_interface(
+    return planning.plan_interface(
         router,
         desired_interface,
-        lambda r, name: get_interface_state(r, name, http_get=http_get),
+        lambda r, name: get_interface_state(r, name, http_get),
     )
+
+
+def build_payload(desired_interface):
+    number = loopback_number(desired_interface["name"])
+    address, netmask = split_ipv4(desired_interface["ipv4"])
+
+    loopback = {
+        "name": number,
+        "description": desired_interface["description"],
+        "ip": {
+            "address": {
+                "primary": {
+                    "address": address,
+                    "mask": netmask,
+                }
+            }
+        },
+    }
+    if desired_interface["admin_state"] == "down":
+        loopback["shutdown"] = [None]
+
+    return number, {"Cisco-IOS-XE-native:Loopback": loopback}
 
 
 def apply_interface(
@@ -134,48 +164,20 @@ def apply_interface(
     http_put=None,
 ):
     """Apply complete desired interface state using RESTCONF."""
-    putter = http_put or _default_http_put
-
-    name = desired_interface["name"]
-    import re
-    digits = re.findall(r"\d+", name)
-    number = int(digits[0]) if digits else int(name[len("Loopback"):])
-    url = (
-        f"https://{router}/restconf/data/"
-        f"Cisco-IOS-XE-native:native/interface/Loopback={number}"
-    )
-
-    ipv4 = IPv4Interface(desired_interface["ipv4"])
-    payload = {
-        "Cisco-IOS-XE-native:Loopback": {
-            "name": number,
-            "description": desired_interface["description"],
-            "ip": {
-                "address": {
-                    "primary": {
-                        "address": str(ipv4.ip),
-                        "mask": str(ipv4.network.netmask),
-                    }
-                }
-            },
-        }
-    }
-
-    if desired_interface.get("admin_state") == "down":
-        payload["Cisco-IOS-XE-native:Loopback"]["shutdown"] = [None]
+    http_put = http_put or _real_http_put
 
     try:
-        response = putter(url, json=payload)
-    except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
-    except (ConnectionError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        return {"status": "error", "result": "connection_failed"}
-    except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        number, payload = build_payload(desired_interface)
+    except (KeyError, TypeError, ValueError):
+        return error("backend_failed")
 
-    if response.status_code in (200, 201, 204):
-        return {"status": "ok", "result": "applied"}
-    if response.status_code in (401, 403):
-        return {"status": "error", "result": "authentication_failed"}
+    try:
+        response = http_put(_apply_url(router, number), json=payload)
+    except Exception as exc:
+        return error_from_exception(exc)
 
-    return {"status": "error", "result": "backend_failed"}
+    if response.status_code in SUCCESS_CODES:
+        return applied()
+    if response.status_code in AUTH_FAILURE_CODES:
+        return error("authentication_failed")
+    return error("backend_failed")
